@@ -1,0 +1,324 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: CloudFormation template for FlexNetGX Unster Database Implementation with Lambda
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment type for the stack
+
+  DomainName:
+    Type: String
+    Description: Domain name for the application
+
+  CertificateArn:
+    Type: String
+    Description: ARN of the SSL certificate for the domain
+
+Resources:
+  UnsterApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: dev
+      Cors:
+        AllowMethods: "'*'"
+        AllowHeaders: "'*'"
+        AllowOrigin: "'*'"
+
+  VPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: unster-vpc
+
+  PublicSubnet1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: 
+        Fn::Ref: VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: us-east-1a
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: public-subnet-1
+
+  PublicSubnet2:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: 
+        Fn::Ref: VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: us-east-1b
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: public-subnet-2
+
+  UnsterFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs18.x
+      CodeUri: ./src
+      MemorySize: 512
+      Timeout: 30
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: 
+            Fn::Ref: UnsterDatabase
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: 
+              Fn::Ref: UnsterDatabase
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId:
+              Fn::Ref: UnsterApi
+            Path: /{proxy+}
+            Method: ANY
+
+  StreamProcessorFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: streamProcessor.handler
+      Runtime: nodejs18.x
+      CodeUri: ./src
+      MemorySize: 512
+      Timeout: 30
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: 
+            Fn::Ref: UnsterDatabase
+      Policies:
+        - DynamoDBStreamReadPolicy:
+            TableName: 
+              Fn::Ref: UnsterDatabase
+        - DynamoDBCrudPolicy:
+            TableName: 
+              Fn::Ref: UnsterDatabase
+      Events:
+        StreamEvent:
+          Type: DynamoDB
+          Properties:
+            Stream: 
+              Fn::GetAtt: [UnsterDatabase, StreamArn]
+            StartingPosition: TRIM_HORIZON
+            BatchSize: 100
+        ScheduledEvent:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Name: ProcessingSchedule
+            Description: "Schedule for processing data every 5 minutes"
+            Enabled: true
+
+  LambdaExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: UnsterLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  Fn::GetAtt: 
+                    - UnsterDatabase
+                    - Arn
+
+  UnsterDatabase:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: unster-db
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: blockchainKey
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+        - AttributeName: blockchainKey
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: TimestampIndex
+          KeySchema:
+            - AttributeName: blockchainKey
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  UnsterBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: unster-assets
+      WebsiteConfiguration:
+        IndexDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  WebDistribution:
+    Type: 'AWS::CloudFront::Distribution'
+    Properties:
+      DistributionConfig:
+        Aliases:
+          - Fn::Ref: DomainName
+        Origins:
+          - DomainName:
+              Fn::GetAtt: 
+                - UnsterBucket
+                - RegionalDomainName
+            Id: S3Origin
+            S3OriginConfig:
+              OriginAccessIdentity:
+                Fn::Sub: 
+                  - origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}
+                  - {}
+          - DomainName:
+              Fn::Sub: 
+                - ${ApiId}.execute-api.${AWS::Region}.amazonaws.com
+                - ApiId:
+                    Fn::Ref: UnsterApi
+            Id: ApiOrigin
+            OriginPath: /dev
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+        Enabled: true
+        DefaultRootObject: index.html
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: ApiOrigin
+            ViewerProtocolPolicy: https-only
+            AllowedMethods:
+              - DELETE
+              - GET
+              - HEAD
+              - OPTIONS
+              - PATCH
+              - POST
+              - PUT
+            CachedMethods:
+              - GET
+              - HEAD
+            ForwardedValues:
+              QueryString: true
+              Headers:
+                - Authorization
+              Cookies:
+                Forward: all
+        ViewerCertificate:
+          AcmCertificateArn:
+            Fn::Ref: CertificateArn
+          SslSupportMethod: sni-only
+
+  CloudFrontOriginAccessIdentity:
+    Type: 'AWS::CloudFront::CloudFrontOriginAccessIdentity'
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: unster-oai
+
+  UnsterLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: /aws/lambda/unster
+      RetentionInDays: 30
+
+Outputs:
+  VpcId:
+    Description: VPC ID
+    Value:
+      Fn::Ref: VPC
+
+  ApiEndpoint:
+    Description: API Gateway Endpoint
+    Value:
+      Fn::Sub:
+        - https://${ApiId}.execute-api.${AWS::Region}.amazonaws.com/dev
+        - ApiId:
+            Fn::Ref: UnsterApi
+
+  LambdaArn:
+    Description: Lambda Function ARN
+    Value:
+      Fn::GetAtt:
+        - UnsterFunction
+        - Arn
+
+  StreamProcessorArn:
+    Description: Stream Processor Lambda Function ARN
+    Value:
+      Fn::GetAtt:
+        - StreamProcessorFunction
+        - Arn
+
+  CloudFrontDomain:
+    Description: CloudFront Distribution Domain
+    Value:
+      Fn::GetAtt:
+        - WebDistribution
+        - DomainName
+
+  DynamoDBTableName:
+    Description: DynamoDB Table Name
+    Value:
+      Fn::Ref: UnsterDatabase
+
+  DynamoDBStreamArn:
+    Description: DynamoDB Stream ARN
+    Value:
+      Fn::GetAtt:
+        - UnsterDatabase
+        - StreamArn

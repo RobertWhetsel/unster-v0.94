@@ -1,0 +1,38 @@
+{
+    "yaml.customTags": [
+        "!And",
+        "!And sequence",
+        "!Base64",
+        "!Cidr",
+        "!Condition",
+        "!Equals",
+        "!Equals sequence",
+        "!FindInMap",
+        "!FindInMap sequence",
+        "!GetAtt",
+        "!GetAtt mapping",
+        "!GetAZs",
+        "!GetAZs scalar",
+        "!If",
+        "!If sequence",
+        "!ImportValue",
+        "!Join",
+        "!Join sequence",
+        "!Not",
+        "!Not sequence",
+        "!Or",
+        "!Or sequence",
+        "!Ref",
+        "!Ref scalar",
+        "!Select",
+        "!Select sequence",
+        "!Split",
+        "!Split sequence",
+        "!Sub",
+        "!Sub sequence",
+        "!Transform"
+    ],
+    "yaml.schemas": {
+        "https://raw.githubusercontent.com/awslabs/goformation/master/schema/cloudformation.schema.json": "/*"
+    }
+}
