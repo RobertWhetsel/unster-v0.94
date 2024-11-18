@@ -1,17 +1,18 @@
 # Unster - FlexNetGX unDatabase Implementation
 
-A scalable AWS infrastructure deployment for the FlexNetGX Unster unDatabase using AWS CloudFormation.
+A scalable serverless AWS infrastructure deployment for the FlexNetGX Unster unDatabase using AWS CloudFormation.
 
 ## Architecture Overview
 
-This project implements a modern cloud architecture with the following components:
+This project implements a modern serverless architecture with the following components:
 
-- **Container Orchestration**: Amazon ECS with Fargate for serverless container management
-- **Database**: Amazon DynamoDB with GSI for timestamp-based queries
+- **API Layer**: API Gateway with CORS support
+- **Compute**: AWS Lambda functions for request handling and stream processing
+- **Database**: Amazon DynamoDB with streams and GSI for timestamp-based queries
 - **Frontend Hosting**: S3 + CloudFront with SSL support
-- **Container Registry**: Amazon ECR with automatic image scanning
 - **Networking**: Custom VPC with public subnets across multiple AZs
 - **Monitoring**: CloudWatch logging integration
+- **Scheduling**: EventBridge for periodic processing
 
 ## Infrastructure Diagram
 
@@ -23,13 +24,20 @@ This project implements a modern cloud architecture with the following component
                      ┌─────────────────────┴─────────────────────┐
                      │                                           │
                ┌─────┴─────┐                             ┌───────┴───────┐
-               │    S3     │                             │  ECS Fargate  │
-               │ (Frontend)│                             │  (Backend)    │
-               └───────────┘                             └───────┬───────┘
-                                                               │
-                                                        ┌──────┴──────┐
-                                                        │  DynamoDB   │
-                                                        └─────────────┘
+               │    S3     │                             │  API Gateway  │
+               │ (Frontend)│                             └───────┬───────┘
+               └───────────┘                                     │
+                                                         ┌──────┴──────┐
+                                                         │   Lambda    │
+                                                         └──────┬──────┘
+                                                                │
+                                                         ┌──────┴──────┐
+                                                         │  DynamoDB   │──┐
+                                                         └─────────────┘  │
+                                                                         │
+                                                                  ┌──────┴──────┐
+                                                                  │Stream Lambda │
+                                                                  └─────────────┘
 ```
 
 ## Prerequisites
@@ -53,17 +61,28 @@ The template accepts the following parameters:
 - GSI: TimestampIndex
   - Partition Key: `blockchainKey`
   - Sort Key: `timestamp`
+- Stream: Enabled with NEW_AND_OLD_IMAGES
+
+### Lambda Functions
+- **Main Function**:
+  - Runtime: Node.js 18.x
+  - Memory: 512MB
+  - Timeout: 30 seconds
+  - Event Source: API Gateway
+
+- **Stream Processor**:
+  - Runtime: Node.js 18.x
+  - Memory: 512MB
+  - Timeout: 30 seconds
+  - Event Sources: 
+    - DynamoDB Stream
+    - EventBridge (5-minute schedule)
 
 ### Networking
 - VPC CIDR: 10.0.0.0/16
 - Public Subnets:
   - us-east-1a: 10.0.1.0/24
   - us-east-1b: 10.0.2.0/24
-
-### Container Configuration
-- CPU: 256 units
-- Memory: 512 MB
-- Port: 8080
 
 ## Deployment Instructions
 
@@ -87,23 +106,25 @@ The template accepts the following parameters:
 
 ## Security Features
 
-- ECR repository configured with automatic image scanning
 - HTTPS enforced via CloudFront
 - IAM roles with least privilege principle
 - VPC with proper subnet isolation
 - CloudWatch logs retention set to 30 days
+- API Gateway with CORS configuration
+- Lambda execution roles with minimal required permissions
 
 ## Outputs
 
 The stack provides the following outputs:
 - VPC ID
-- ECS Cluster ARN
-- ECR Repository URI
+- API Gateway Endpoint
+- Lambda Function ARNs
 - CloudFront Distribution Domain
-- DynamoDB Table Name
+- DynamoDB Table Name and Stream ARN
 
-## Maintenance
+## Monitoring
 
-- Monitor CloudWatch logs at `/aws/ecs/unster`
-- ECR images are immutable to ensure version control
+- Monitor CloudWatch logs at `/aws/lambda/unster`
 - DynamoDB is configured with on-demand capacity for automatic scaling
+- Stream processor runs on a 5-minute schedule for periodic data processing
+- API Gateway metrics available in CloudWatch
